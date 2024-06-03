@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+*.conf
+
+pyRCX.conf
+
+conf/ 
 # C extensions
 *.so
 

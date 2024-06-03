@@ -5648,39 +5648,81 @@ def load_channel_history():  # this is information such as channels, max users e
         logger.debug(e)
         server_context.server_access_entries = []
 
+import socket
+import threading
+import logging
+import traceback
 
+
+def read_proxy_protocol_header(clientsocket):
+    # Read the first line from the client socket
+    return clientsocket.recv(1024).decode("utf-8").strip()
+def parse_proxy_protocol_header(header):
+    parts = header.split()
+    if parts[0] != "PROXY":
+        raise ValueError(f"Header does not start with 'PROXY': {header}")
+    if len(parts) < 6:
+        raise ValueError(f"Incomplete PROXY header: {header}")
+    return parts[2], int(parts[4])  # Return the real client IP and port
 class ServerListen(threading.Thread):
-
     def __init__(self, port):
         self.port = port
+        self.connected_clients = set()  # Track connected clients
         threading.Thread.__init__(self)
         self.logger = logging.getLogger('SERVER')
 
     def run(self):
-
         try:
             smain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             smain.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            smain.bind((ipaddress, int(self.port)))
-            smain.settimeout(5.0)
+            smain.bind(('0.0.0.0', int(self.port)))
+            smain.settimeout(10.0)  # Increased timeout to 10 seconds
             smain.listen(100)
 
-            self.logger.info("Listening on port " + str(self.port) + " at '" + (ipaddress.strip() or "localhost") + "'")
+            self.logger.info(f"Listening on port {self.port}")
 
             while True:
                 time.sleep(0.1)
                 try:
-                    try:
-                        (clientsocket, address) = smain.accept()
-                        ClientConnecting(clientsocket, address, self.port).start()
-                    except:
-                        if self.port not in server_context.configuration.unencrypted_ports:
-                            self.logger.info(f"Terminating server on port {self.port}")
-                            break
+                    clientsocket, address = smain.accept()
 
-                except Exception as error:
-                    self.logger.info("There was an error whilst a user was connecting")
+                    # Check if the client IP and port combination is already connected
+                    if (address[0], address[1]) in self.connected_clients:
+                        self.logger.info(f"Connection from {address[0]}:{address[1]} already established. "
+                                         f"Closing the duplicate connection.")
+                        clientsocket.close()
+                        continue
+
+                    # Add the client IP and port combination to the set of connected clients
+                    self.connected_clients.add((address[0], address[1]))
+
+                    # Read the first line from the client to check for the PROXY header
+                    header = read_proxy_protocol_header(clientsocket)
+                    if header.startswith("PROXY"):
+                        # Parse the PROXY protocol header
+                        real_ip, real_port = parse_proxy_protocol_header(header)
+                        # self.logger.info(f"Connection from {real_ip}:{real_port} through proxy")
+                    else:
+                        # No PROXY header, extract client IP and port directly
+                        real_ip, real_port = address[0], address[1]
+                        # self.logger.info(f"Direct connection from {real_ip}:{real_port}")
+
+                    # Pass the real IP and port to the ClientConnecting handler
+                    (clientsocket, address) = smain.accept()
+                    ClientConnecting(clientsocket, (real_ip, real_port), self.port).start()
+                except socket.timeout:
+                    continue  # No connection received within the timeout period, continue to listen
+                except ValueError as ve:
+                    self.logger.error(f"Error parsing PROXY header: {str(ve)}")
                     self.logger.debug(traceback.format_exc())
+                    # Close the connection if PROXY header parsing fails
+                    clientsocket.close()
+                except Exception as e:
+                    self.logger.error(f"Error accepting connection: {str(e)}")
+                    self.logger.debug(traceback.format_exc())
+                    if self.port not in server_context.configuration.unencrypted_ports:
+                        self.logger.info(f"Terminating server on port {self.port}")
+                        break
 
         except Exception as error:
             self.logger.error(f"Socket error on port {self.port} (Bind Error)")
@@ -5688,6 +5730,9 @@ class ServerListen(threading.Thread):
 
         if self.port in currentports:
             del currentports[self.port]
+
+
+# Rest of the code remains unchanged
 
 
 def GetEpochTime():
